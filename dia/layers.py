@@ -124,7 +124,7 @@ class RotaryEmbedding(nn.Module):
         sinusoid_inp = position / self.timescale
         sin = torch.sin(sinusoid_inp)
         cos = torch.cos(sinusoid_inp)
-        return apply_rotary_emb(inputs.unsqueeze(0), sin, cos).squeeze(0)
+        return apply_rotary_emb(inputs.unsqueeze(0), cos, sin).squeeze(0)
         first_half, second_half = torch.chunk(inputs.to(torch.float32), 2, dim=-1)
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
