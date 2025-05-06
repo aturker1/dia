@@ -586,7 +586,7 @@ class Dia:
         audio_prompt: list[str | torch.Tensor | None] | str | torch.Tensor | None = None,
         audio_prompt_path: list[str | torch.Tensor | None] | str | torch.Tensor | None = None,
         use_cfg_filter: bool | None = None,
-        verbose: bool = False,
+        verbose: bool = True,
     ) -> np.ndarray | list[np.ndarray]:
         """Generates audio corresponding to the input text.
 

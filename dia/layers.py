@@ -7,7 +7,7 @@ from torch.nn import RMSNorm
 
 from .config import DiaConfig
 from .state import DecoderInferenceState, EncoderInferenceState, KVCache
-from vllm.vllm_flash_attn.layers.rotary_embedding import apply_rotary_emb
+from vllm.model_executor.layers.rotary_embedding import _apply_rotary_emb
 
 
 def _normalize_axes(axes: tuple[int, ...], ndim: int) -> tuple[int, ...]:
@@ -120,16 +120,22 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, inputs: torch.Tensor, position: torch.Tensor):
         """Applies RoPE."""
-        position = position.unsqueeze(-1).unsqueeze(-1)
+        position = position.unsqueeze(-1)
         sinusoid_inp = position / self.timescale
         sin = torch.sin(sinusoid_inp)
         cos = torch.cos(sinusoid_inp)
-        return apply_rotary_emb(inputs.unsqueeze(0), cos, sin).squeeze(0)
+        # print(inputs.shape, cos.shape, sin.shape)
+        # from vllm.platforms import current_platform
+        # print(current_platform.is_cuda_alike())
+
+        return _apply_rotary_emb(inputs, cos, sin, True)
         first_half, second_half = torch.chunk(inputs.to(torch.float32), 2, dim=-1)
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
-        return torch.cat((first_part.to(self.compute_dtype), second_part.to(self.compute_dtype)), dim=-1)
-
+        print(first_part.shape, second_part.shape)
+        res2 = torch.cat((first_part.to(self.compute_dtype), second_part.to(self.compute_dtype)), dim=-1)
+        print(res.shape, res2.shape)
+        return res
 
 class Attention(nn.Module):
     """Attention using DenseGeneral."""

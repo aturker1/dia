@@ -126,6 +126,7 @@ def main():
             cfg_scale=args.cfg_scale,
             temperature=args.temperature,
             top_p=args.top_p,
+            verbose=True
         )
         print("Audio generation complete.")
 
