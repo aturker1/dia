@@ -7,6 +7,7 @@ from torch.nn import RMSNorm
 
 from .config import DiaConfig
 from .state import DecoderInferenceState, EncoderInferenceState, KVCache
+from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
 
 def _normalize_axes(axes: tuple[int, ...], ndim: int) -> tuple[int, ...]:
@@ -123,6 +124,7 @@ class RotaryEmbedding(nn.Module):
         sinusoid_inp = position / self.timescale
         sin = torch.sin(sinusoid_inp)
         cos = torch.cos(sinusoid_inp)
+        return apply_rotary_emb(inputs.unsqueeze(0), sin, cos).squeeze(0)
         first_half, second_half = torch.chunk(inputs.to(torch.float32), 2, dim=-1)
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
