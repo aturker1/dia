@@ -7,7 +7,7 @@ from torch.nn import RMSNorm
 
 from .config import DiaConfig
 from .state import DecoderInferenceState, EncoderInferenceState, KVCache
-from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+from vllm.vllm_flash_attn.layers.rotary_embedding import apply_rotary_emb
 
 
 def _normalize_axes(axes: tuple[int, ...], ndim: int) -> tuple[int, ...]:
