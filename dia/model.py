@@ -175,6 +175,7 @@ class Dia:
         compute_dtype: str | ComputeDtype = ComputeDtype.FLOAT32,
         device: torch.device | None = None,
         load_dac: bool = True,
+        **kwargs,
     ) -> "Dia":
         """Loads the Dia model from a Hugging Face Hub repository.
 
@@ -204,9 +205,18 @@ class Dia:
             raise RuntimeError(f"Error loading model from Hugging Face Hub ({model_name})") from e
 
         config = loaded_model.config  # Get config from the loaded model
-        dia = cls(config, compute_dtype, device, load_dac)
+        config.model.fused_rope = kwargs.get("fused_rope", False)
+        config.model.use_flash_attn = kwargs.get("use_flash_attn", False)
+        config.model.torch_linear = kwargs.get("torch_linear", False)
+        
 
-        dia.model = loaded_model  # Assign the already loaded model
+
+
+
+        print("Starting model creation")
+        dia = cls(config, compute_dtype, device, load_dac)
+        print("Model created")
+        dia.model.load_state_dict(loaded_model.state_dict())
         dia.model.to(dia.device)
         dia.model.eval()
         if load_dac:

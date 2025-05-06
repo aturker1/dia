@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from huggingface_hub import PyTorchModelHubMixin
 from torch import Tensor
 from torch.nn import RMSNorm
+import numpy as np
 
 from .config import DiaConfig
 from .state import DecoderInferenceState, EncoderInferenceState, KVCache
@@ -60,26 +61,109 @@ class DenseGeneral(nn.Module):
         return output
 
 
+
+
+
+class DenseGeneralOptimized(nn.Module):
+    """
+    Optimized version of DenseGeneral that uses matrix multiplication operations
+    instead of tensordot for better performance.
+    """
+    def __init__(
+        self,
+        in_features: tuple[int, ...],
+        out_features: tuple[int, ...],
+        axis: tuple[int, ...] = (-1,),
+        weight_dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        self.out_features = out_features
+        self.axis = axis
+        self.in_features = int(np.prod(in_features))
+        self.out_features_flat = int(np.prod(out_features))
+        
+        factory_kwargs = {"device": device, "dtype": weight_dtype}
+        self.weight = nn.Parameter(torch.empty((self.in_features, self.out_features_flat), **factory_kwargs))
+
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        """
+        Override the default PyTorch state_dict loading to handle reshaping weights from DenseGeneral.
+        This allows using load_state_dict with weights from a DenseGeneral model.
+        """
+        # Check if the weight has DenseGeneral shape (multi-dimensional)
+        weight_key = prefix + 'weight'
+        if weight_key in state_dict:
+            weight_shape = state_dict[weight_key].shape
+            expected_shape = self.weight.shape
+            
+            # If the shapes don't match but the total number of elements does, reshape
+            if weight_shape != expected_shape and np.prod(weight_shape) == np.prod(expected_shape):
+                state_dict[weight_key] = state_dict[weight_key].reshape(expected_shape)
+        
+        # Call the parent implementation to load the state dict with the possibly modified weights
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        # Get the dimensions
+        batch_dims = inputs.shape[:-1]
+        
+        # Flatten all dimensions except the last one (the one we're operating on)
+        x_flat = inputs.reshape(-1, self.in_features)
+        
+        # Perform matrix multiplication
+        output_flat = torch.matmul(x_flat, self.weight)
+        
+        # Reshape back to the original batch dimensions plus the output features
+        output = output_flat.reshape(*batch_dims, *self.out_features)
+        
+        return output
+
+
+class OptimizedLinear(nn.Module):
+    """
+    Native PyTorch optimized equivalent to DenseGeneral with in_shapes=(32,), out_features=(64,), axis=(-1,)
+    """
+    def __init__(self, in_features: int, out_features: int, weight_dtype: torch.dtype):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(in_features, out_features, dtype=weight_dtype))
+    
+    def forward(self, inputs: Tensor) -> Tensor:
+        return inputs @ self.weight
+
 class MlpBlock(nn.Module):
     """MLP block using DenseGeneral."""
 
-    def __init__(self, embed_dim: int, intermediate_dim: int, compute_dtype: torch.dtype):
+    def __init__(self, config: DiaConfig, embed_dim: int, intermediate_dim: int, compute_dtype: torch.dtype):
         super().__init__()
         self.dtype = compute_dtype
 
-        self.wi_fused = DenseGeneral(
-            in_shapes=(embed_dim,),
-            out_features=(2, intermediate_dim),
-            axis=(-1,),
-            weight_dtype=compute_dtype,
-        )
 
-        self.wo = DenseGeneral(
-            in_shapes=(intermediate_dim,),
-            out_features=(embed_dim,),
-            axis=(-1,),
-            weight_dtype=compute_dtype,
-        )
+        if config.model.torch_linear:
+            print("Using torch.linear")
+            self.wi_fused = DenseGeneralOptimized(in_features=embed_dim, out_features=(2, intermediate_dim), weight_dtype=compute_dtype)
+            self.wo = OptimizedLinear(in_features=intermediate_dim, out_features=embed_dim, weight_dtype=compute_dtype)
+        else:
+            print("Using DenseGeneral")
+            self.wi_fused = DenseGeneral(
+                in_shapes=(embed_dim,),
+                out_features=(2, intermediate_dim),
+                axis=(-1,),
+                weight_dtype=compute_dtype,
+            )
+            self.wo = DenseGeneral(
+                in_shapes=(intermediate_dim,),
+                out_features=(embed_dim,),
+                axis=(-1,),
+                weight_dtype=compute_dtype,
+            )
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass."""
@@ -103,6 +187,7 @@ class RotaryEmbedding(nn.Module):
         min_timescale: int = 1,
         max_timescale: int = 10000,
         dtype: torch.dtype = torch.float32,
+        fused_rope: bool = False,
     ):
         super().__init__()
         if embedding_dims % 2 != 0:
@@ -111,7 +196,7 @@ class RotaryEmbedding(nn.Module):
         self.min_timescale = min_timescale
         self.max_timescale = max_timescale
         self.compute_dtype = dtype
-
+        self.fused_rope = False
         half_embedding_dim = embedding_dims // 2
         fraction = (2.0 * torch.arange(0, half_embedding_dim)) / embedding_dims
         timescale = (self.min_timescale * (self.max_timescale / self.min_timescale) ** fraction).to(torch.float32)
@@ -119,14 +204,22 @@ class RotaryEmbedding(nn.Module):
 
     def forward(self, inputs: torch.Tensor, position: torch.Tensor):
         """Applies RoPE."""
-        position = position.unsqueeze(-1).unsqueeze(-1)
+        position = position.unsqueeze(-1)
+        if not self.fused_rope:
+            position = position.unsqueeze(-1)
+
         sinusoid_inp = position / self.timescale
-        sin = torch.sin(sinusoid_inp)
-        cos = torch.cos(sinusoid_inp)
-        first_half, second_half = torch.chunk(inputs.to(torch.float32), 2, dim=-1)
-        first_part = first_half * cos - second_half * sin
-        second_part = second_half * cos + first_half * sin
-        return torch.cat((first_part.to(self.compute_dtype), second_part.to(self.compute_dtype)), dim=-1)
+        sin = torch.sin(sinusoid_inp).squeeze(0)
+        cos = torch.cos(sinusoid_inp).squeeze(0)
+
+        if self.fused_rope:
+            from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+            return apply_rotary_emb(inputs.to(torch.float32), cos, sin, True).to(self.compute_dtype)
+        else:
+            first_half, second_half = torch.chunk(inputs.to(torch.float32), 2, dim=-1)
+            first_part = first_half * cos - second_half * sin
+            second_part = second_half * cos + first_half * sin
+            return torch.cat((first_part.to(self.compute_dtype), second_part.to(self.compute_dtype)), dim=-1)
 
 
 class Attention(nn.Module):
@@ -145,12 +238,14 @@ class Attention(nn.Module):
         out_embed_dim: int | None = None,
     ):
         super().__init__()
+
         self.num_query_heads = num_query_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.is_cross_attn = is_cross_attn
         self.output_dim = out_embed_dim if out_embed_dim is not None else q_embed_dim
         self.projected_query_dim = num_query_heads * head_dim
+        self.use_flash_attn = config.model.use_flash_attn
         if num_query_heads % num_kv_heads != 0:
             raise ValueError(f"num_query_heads ({num_query_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
         self.num_gqa_groups = num_query_heads // num_kv_heads
@@ -187,6 +282,7 @@ class Attention(nn.Module):
             min_timescale=config.model.rope_min_timescale,
             max_timescale=config.model.rope_max_timescale,
             dtype=compute_dtype,
+            fused_rope=config.model.fused_rope,
         )
 
     def forward(
@@ -221,7 +317,6 @@ class Attention(nn.Module):
         if kv_positions is None:
             kv_positions = q_positions
         original_dtype = Xq.dtype
-
         Xq_BxTxNxH = self.q_proj(Xq)
         Xq_BxTxNxH = self.rotary_emb(Xq_BxTxNxH, position=q_positions)
         Xq_BxNxTxH = Xq_BxTxNxH.transpose(1, 2)
@@ -248,6 +343,7 @@ class Attention(nn.Module):
             else:
                 attn_k, attn_v = cache.update(Xk_BxKxSxH, Xv_BxKxSxH, current_idx)
 
+
         attn_output = F.scaled_dot_product_attention(
             Xq_BxNxTxH,
             attn_k,
@@ -257,6 +353,7 @@ class Attention(nn.Module):
             enable_gqa=self.num_gqa_groups > 1,
             is_causal=is_causal,
         )
+
 
         attn_output = attn_output.transpose(1, 2).contiguous()  # (B, T, N, H)
         output = self.o_proj(attn_output)
@@ -280,6 +377,7 @@ class EncoderLayer(nn.Module):
             eps=model_config.normalization_layer_epsilon,
             dtype=torch.float32,
         )
+
         self.self_attention = Attention(
             config,
             q_embed_dim=embed_dim,
@@ -296,7 +394,7 @@ class EncoderLayer(nn.Module):
             eps=model_config.normalization_layer_epsilon,
             dtype=torch.float32,
         )
-        self.mlp = MlpBlock(embed_dim=embed_dim, intermediate_dim=enc_config.n_hidden, compute_dtype=compute_dtype)
+        self.mlp = MlpBlock(config=config, embed_dim=embed_dim, intermediate_dim=enc_config.n_hidden, compute_dtype=compute_dtype)
 
     def forward(
         self,
@@ -415,6 +513,7 @@ class DecoderLayer(nn.Module):
         )
         # MLP
         self.mlp = MlpBlock(
+            config=config,
             embed_dim=dec_embed_dim,
             intermediate_dim=dec_config.n_hidden,
             compute_dtype=compute_dtype,

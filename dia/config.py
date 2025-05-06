@@ -100,7 +100,7 @@ class DecoderConfig(BaseModel, frozen=True):
     cross_head_dim: int = Field(gt=0)
 
 
-class ModelConfig(BaseModel, frozen=True):
+class ModelConfig(BaseModel):
     """Main configuration container for the Dia model architecture.
 
     Attributes:
@@ -124,13 +124,16 @@ class ModelConfig(BaseModel, frozen=True):
     weight_dtype: str = Field(default="float32", description="Weight precision")
     rope_min_timescale: int = Field(default=1, description="Timescale For global Attention")
     rope_max_timescale: int = Field(default=10_000, description="Timescale For global Attention")
+    fused_rope: bool = Field(default=False, description="Use fused Rope")
+    use_flash_attn: bool = Field(default=False, description="Use flash attention")
+    torch_linear: bool = Field(default=False, description="Use torch.linear instead of tensordot")
 
 
 class TrainingConfig(BaseModel, frozen=True):
     pass
 
 
-class DiaConfig(BaseModel, frozen=True):
+class DiaConfig(BaseModel):
     """Master configuration for the Dia model.
 
     Combines all sub-configurations into a single validated object.
