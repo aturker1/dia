@@ -128,7 +128,7 @@ class RotaryEmbedding(nn.Module):
         # from vllm.platforms import current_platform
         # print(current_platform.is_cuda_alike())
 
-        return _apply_rotary_emb(inputs, cos, sin, True)
+        return _apply_rotary_emb(inputs.to(torch.float32), cos, sin, True).to(self.compute_dtype)
         first_half, second_half = torch.chunk(inputs.to(torch.float32), 2, dim=-1)
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
