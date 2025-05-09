@@ -583,6 +583,37 @@ class Dia:
 
         sf.write(path, audio, DEFAULT_SAMPLE_RATE)
 
+    def generate_internal_step(self, batch_size, dec_step, current_idx, dec_state, dec_output, cfg_scale, temperature, top_p, cfg_filter_top_k, bos_over, max_tokens):
+        internal_step_size = 15
+        internal_pred = torch.zeros((batch_size, internal_step_size, self.config.data.channels), dtype=torch.long, device=self.device)
+        for internal_step in range(internal_step_size):
+            torch.compiler.cudagraph_mark_step_begin()
+            current_step_idx = dec_step + 1
+            dec_state.prepare_step(dec_step)
+            tokens_Bx1xC = dec_output.get_tokens_at(dec_step).repeat_interleave(2, dim=0)  # Repeat for CFG
+
+            pred_BxC = self._decoder_step(
+                tokens_Bx1xC,
+                dec_state,
+                cfg_scale,
+                temperature,
+                top_p,
+                cfg_filter_top_k,
+                current_idx,
+            )
+
+            internal_pred[:, internal_step, :] = pred_BxC
+            dec_output.update_one(pred_BxC, current_step_idx, not bos_over)
+
+            current_idx += 1
+            dec_step += 1
+
+
+            if dec_step >= max_tokens:
+                break
+
+        return internal_pred, dec_step
+
     @torch.inference_mode()
     def generate(
         self,
@@ -649,8 +680,9 @@ class Dia:
 
         if use_torch_compile and not hasattr(self, "_compiled"):
             # Compilation can take about a minute.
-            self._prepare_generation = torch.compile(self._prepare_generation, dynamic=True, fullgraph=True)
-            self._decoder_step = torch.compile(self._decoder_step, fullgraph=True, mode="max-autotune")
+            # self._prepare_generation = torch.compile(self._prepare_generation, dynamic=True, fullgraph=True)
+            # self._decoder_step = torch.compile(self._decoder_step, fullgraph=True, mode="max-autotune")
+            self.generate_internal_step = torch.compile(self.generate_internal_step)
             self._compiled = True
 
         if isinstance(audio_prompt, list):
@@ -674,11 +706,10 @@ class Dia:
         dec_step = min(dec_output.prefill_steps) - 1
         current_idx = torch.tensor([dec_step], device=self.device)
 
-        eos_detected_Bx = torch.zeros((batch_size,), dtype=torch.bool, device=self.device)
-        eos_countdown_Bx = torch.full((batch_size,), -1, dtype=torch.long, device=self.device)
         finished_step_Bx = torch.full((batch_size,), -1, dtype=torch.long, device=self.device)
 
         bos_over = False
+
 
         if verbose:
             print("generate: starting generation loop")
@@ -686,71 +717,37 @@ class Dia:
                 print("generate: using use_torch_compile=True, the first step may be slow")
             start_time = time.time()
 
+
+        eos_idx = -1
+        start_time = time.time()
         # --- Generation Loop ---
         while dec_step < max_tokens:
-            if (eos_countdown_Bx == 0).all():
+            internal_pred, dec_step = self.generate_internal_step(batch_size, dec_step, current_idx, dec_state, dec_output, cfg_scale, temperature, top_p, cfg_filter_top_k, bos_over, max_tokens)
+            
+
+            if eos_idx == -1 and (internal_pred[0, :, 0] == audio_eos_value).any():
+                eos_idx = internal_pred[0, :, 0].tolist().index(audio_eos_value)
+                eos_idx = dec_step + eos_idx - 15
+            elif eos_idx != -1:
+                # 15 is taken from highest delay pattern
+                threshold_tensor = delay_pattern_Cx
+                col_indices = torch.arange(delay_pattern_Cx.max(), device=threshold_tensor.device)
+                eos_mask = col_indices.unsqueeze(0) == threshold_tensor.unsqueeze(1)
+                pad_mask = col_indices.unsqueeze(0) > threshold_tensor.unsqueeze(1)
+                finished_step_Bx[:] = eos_idx
+
+                dec_output.generated_tokens[:, eos_idx:eos_idx+delay_pattern_Cx.max(), :] = torch.where(eos_mask.T, audio_eos_value, dec_output.generated_tokens[:, eos_idx:eos_idx+delay_pattern_Cx.max(), :])
+                dec_output.generated_tokens[:, eos_idx:eos_idx+delay_pattern_Cx.max(), :] = torch.where(pad_mask.T, audio_pad_value, dec_output.generated_tokens[:, eos_idx:eos_idx+delay_pattern_Cx.max(), :])
+
                 break
+        
+        
+        duration = time.time() - start_time
 
-            current_step_idx = dec_step + 1
-            torch.compiler.cudagraph_mark_step_begin()
-            dec_state.prepare_step(dec_step)
-            tokens_Bx1xC = dec_output.get_tokens_at(dec_step).repeat_interleave(2, dim=0)  # Repeat for CFG
-
-            pred_BxC = self._decoder_step(
-                tokens_Bx1xC,
-                dec_state,
-                cfg_scale,
-                temperature,
-                top_p,
-                cfg_filter_top_k,
-                current_idx,
+        if verbose and duration > 0:
+            print(
+                f"generate step {dec_step}: speed={dec_step / duration:.3f} tokens/s, realtime factor={batch_size / duration:.3f}x"
             )
-
-            current_idx += 1
-
-            active_mask_Bx = eos_countdown_Bx != 0
-            eos_trigger_Bx = torch.zeros_like(active_mask_Bx)
-            if active_mask_Bx.any():
-                is_eos_token = (~eos_detected_Bx[active_mask_Bx]) & (pred_BxC[active_mask_Bx, 0] == audio_eos_value)
-                is_max_len = current_step_idx >= max_tokens - max_delay_pattern
-                eos_trigger_Bx[active_mask_Bx] = is_eos_token | is_max_len
-            eos_detected_Bx |= eos_trigger_Bx
-            start_countdown_mask_Bx = eos_trigger_Bx & (eos_countdown_Bx < 0)
-            if start_countdown_mask_Bx.any():
-                eos_countdown_Bx[start_countdown_mask_Bx] = max_delay_pattern
-                finished_step_Bx[start_countdown_mask_Bx] = current_step_idx
-
-            padding_mask_Bx = eos_countdown_Bx > 0
-            if padding_mask_Bx.any():
-                pred_active_BxC = pred_BxC[padding_mask_Bx].clone()
-                countdown_active_Bx = eos_countdown_Bx[padding_mask_Bx]
-                step_after_eos_Bx = max_delay_pattern - countdown_active_Bx
-                step_after_eos_Bx_ = step_after_eos_Bx.unsqueeze(1)
-                delay_pattern_Cx_ = delay_pattern_Cx.unsqueeze(0)
-                eos_mask_NxC = step_after_eos_Bx_ == delay_pattern_Cx_
-                pad_mask_NxC = step_after_eos_Bx_ > delay_pattern_Cx_
-                pred_active_BxC[eos_mask_NxC] = audio_eos_value
-                pred_active_BxC[pad_mask_NxC] = audio_pad_value
-                pred_BxC[padding_mask_Bx] = pred_active_BxC
-                eos_countdown_Bx[padding_mask_Bx] -= 1
-
-            # --- Update BOS flag (Original) ---
-            if not bos_over:
-                bos_over = all(
-                    dec_step - prefill_step > max_delay_pattern for prefill_step in dec_output.prefill_steps
-                )
-
-            dec_output.update_one(pred_BxC, current_step_idx, not bos_over)
-
-            dec_step += 1
-
-            if verbose and dec_step % 86 == 0:
-                duration = time.time() - start_time
-                if duration > 0:
-                    print(
-                        f"generate step {dec_step}: speed={86 * batch_size / duration:.3f} tokens/s, realtime factor={batch_size / duration:.3f}x"
-                    )
-                start_time = time.time()
 
         # --- Finalize and Extract Output ---
         final_step = dec_step + 1
@@ -786,7 +783,6 @@ class Dia:
                 total_duration = time.time() - total_start_time
                 print(f"generate: avg steps={avg_steps:.1f}, total duration={total_duration:.3f}s")
 
-            del dec_state
 
             outputs = self._generate_output(generated_codes, lengths_Bx)
         else:

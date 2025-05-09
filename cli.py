@@ -2,6 +2,11 @@ import argparse
 import os
 import random
 
+import os
+
+# Set the environment variable before importing torch
+os.environ["TORCH_LOGS"] = "recompiles"
+
 import numpy as np
 import soundfile as sf
 import torch
@@ -25,10 +30,12 @@ def set_seed(seed: int):
 def main():
     parser = argparse.ArgumentParser(description="Generate audio using the Dia model.")
 
-    parser.add_argument("text", type=str, help="Input text for speech generation.")
+    parser.add_argument("--text", type=str, default="Dia is opensource model!", help="Input text for speech generation.")
     parser.add_argument(
-        "--output", type=str, required=True, help="Path to save the generated audio file (e.g., output.wav)."
+        "--output", type=str, default="output.mp3", help="Path to save the generated audio file (e.g., output.wav)."
     )
+
+
 
     parser.add_argument(
         "--repo-id",
@@ -75,6 +82,7 @@ def main():
     )
 
     args = parser.parse_args()
+    
 
     # Validation for local paths
     if args.local_paths:
@@ -101,14 +109,14 @@ def main():
     if args.local_paths:
         print(f"Loading from local paths: config='{args.config}', checkpoint='{args.checkpoint}'")
         try:
-            model = Dia.from_local(args.config, args.checkpoint, device=device)
+            model = Dia.from_local(args.config, args.checkpoint, device=device, compute_dtype="float16")
         except Exception as e:
             print(f"Error loading local model: {e}")
             exit(1)
     else:
         print(f"Loading from Hugging Face Hub: repo_id='{args.repo_id}'")
         try:
-            model = Dia.from_pretrained(args.repo_id, device=device)
+            model = Dia.from_pretrained(args.repo_id, device=device, compute_dtype="float16")
         except Exception as e:
             print(f"Error loading model from Hub: {e}")
             exit(1)
@@ -126,6 +134,7 @@ def main():
             cfg_scale=args.cfg_scale,
             temperature=args.temperature,
             top_p=args.top_p,
+            verbose=True,
         )
         print("Audio generation complete.")
 
