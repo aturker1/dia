@@ -99,10 +99,10 @@ class KVCache(torch.nn.Module):
             v=v,
         )
 
-    def update(self, k: torch.Tensor, v: torch.Tensor, current_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def update(self, k: torch.Tensor, v: torch.Tensor, current_idx: torch.Tensor, internal_idx) -> tuple[torch.Tensor, torch.Tensor]:
         k_out, v_out = self.k, self.v
-        k_out[:, :, current_idx, :] = k
-        v_out[:, :, current_idx, :] = v
+        k_out[:, :, current_idx, :] = k[:,:, internal_idx:internal_idx+1, :]
+        v_out[:, :, current_idx, :] = v[:, :, internal_idx:internal_idx+1, :]
         # self.current_idx += 1
         # return self.k[:, :, : self.current_idx, :], self.v[:, :, : self.current_idx, :]
         return self.k, self.v
@@ -195,6 +195,16 @@ class DecoderOutput:
         if step_to is None:
             step_to = step_from + 1
         return self.generated_tokens[:, step_from:step_to, :]
+    
+
+    def update_group(self, dec_out_group: torch.Tensor, step: int, n_samples:int, apply_mask: bool = False):
+        dec_out_group = dec_out_group.to(self.generated_tokens.dtype)
+
+        if apply_mask:
+            mask = self.generated_tokens[:, step:step+n_samples, :] == -1
+            self.generated_tokens[:, step:step+n_samples, :] = torch.where(mask, dec_out_group, self.generated_tokens[:, step:step+n_samples, :])
+        else:
+            self.generated_tokens[:, step:step+n_samples, :] = dec_out_group
 
     def update_one(self, dec_out: torch.Tensor, step: int, apply_mask: bool = False):
         dec_out = dec_out.to(self.generated_tokens.dtype)
