@@ -405,6 +405,7 @@ class Dia:
         top_p: float,
         top_k: int,
         current_idx: int,
+        internal_idx: int = 0,
     ) -> torch.Tensor:
         """Performs a single step of the decoder inference.
 
@@ -430,7 +431,7 @@ class Dia:
         B = tokens_Bx1xC.shape[0] // 2
 
         audio_eos_value = self.config.data.audio_eos_value
-        logits_Bx1xCxV = self.model.decoder.decode_step(tokens_Bx1xC, dec_state, current_idx)
+        logits_Bx1xCxV = self.model.decoder.decode_step(tokens_Bx1xC, dec_state, current_idx, internal_idx)
 
         logits_last_2BxCxV = logits_Bx1xCxV[:, -1]
         logits_last_Bx2xCxV = logits_last_2BxCxV.view(B, 2, *logits_last_2BxCxV.shape[1:])
@@ -583,6 +584,31 @@ class Dia:
 
         sf.write(path, audio, DEFAULT_SAMPLE_RATE)
 
+
+    def generate_internal_step_comp(self, batch_size, current_idx, dec_state, cfg_scale, temperature, top_p, cfg_filter_top_k, n_steps, dec_out):
+        internal_pred = torch.zeros((batch_size, n_steps, self.config.data.channels), dtype=torch.long, device=self.device)
+
+        pred_BxC = torch.zeros((batch_size, self.config.data.channels), dtype=torch.long, device=self.device)
+        for internal_step in range(n_steps):           
+            tokens = torch.where(dec_out[:, internal_step:internal_step+1] == -1, pred_BxC, dec_out[:, internal_step:internal_step+1])         
+            tokens_Bx1xC = tokens.repeat_interleave(2, dim=0)  # Repeat for CFG
+
+            pred_BxC = self._decoder_step(
+                tokens_Bx1xC,
+                dec_state,
+                cfg_scale,
+                temperature,
+                top_p,
+                cfg_filter_top_k,
+                current_idx + internal_step,
+                internal_idx=internal_step,
+            )
+
+            internal_pred[:, internal_step, :] = pred_BxC   
+
+        return internal_pred
+
+
     def generate_internal_step(self, batch_size, dec_step, current_idx, dec_state, dec_output, cfg_scale, temperature, top_p, cfg_filter_top_k, bos_over, max_tokens):
         internal_step_size = 15
         internal_pred = torch.zeros((batch_size, internal_step_size, self.config.data.channels), dtype=torch.long, device=self.device)
@@ -664,6 +690,7 @@ class Dia:
         audio_eos_value = self.config.data.audio_eos_value
         audio_pad_value = self.config.data.audio_pad_value
         delay_pattern = self.config.data.delay_pattern
+        num_channels = self.config.data.channels
         max_tokens = self.config.data.audio_length if max_tokens is None else max_tokens
         max_delay_pattern = max(delay_pattern)
         delay_pattern_Cx = torch.tensor(delay_pattern, device=self.device, dtype=torch.long)
@@ -680,9 +707,9 @@ class Dia:
 
         if use_torch_compile and not hasattr(self, "_compiled"):
             # Compilation can take about a minute.
-            # self._prepare_generation = torch.compile(self._prepare_generation, dynamic=True, fullgraph=True)
-            # self._decoder_step = torch.compile(self._decoder_step, fullgraph=True, mode="max-autotune")
-            self.generate_internal_step = torch.compile(self.generate_internal_step)
+            self._prepare_generation = torch.compile(self._prepare_generation, dynamic=True, fullgraph=True)
+            self._decoder_step = torch.compile(self._decoder_step, fullgraph=True, mode="max-autotune")            
+            self.generate_internal_step_comp = torch.compile(self.generate_internal_step_comp, dynamic=True,  fullgraph=True, mode="max-autotune")
             self._compiled = True
 
         if isinstance(audio_prompt, list):
@@ -720,15 +747,33 @@ class Dia:
 
         eos_idx = -1
         start_time = time.time()
+        current_step = 0
+        n_group_steps = 2
         # --- Generation Loop ---
         while dec_step < max_tokens:
-            internal_pred, dec_step = self.generate_internal_step(batch_size, dec_step, current_idx, dec_state, dec_output, cfg_scale, temperature, top_p, cfg_filter_top_k, bos_over, max_tokens)
-            
+            if dec_step + n_group_steps >= max_tokens:
+                # TODO: Handle this scenario
+                break
 
-            if eos_idx == -1 and (internal_pred[0, :, 0] == audio_eos_value).any():
-                eos_idx = internal_pred[0, :, 0].tolist().index(audio_eos_value)
-                eos_idx = dec_step + eos_idx - 15
-            elif eos_idx != -1:
+            dec_state.prepare_step(dec_step, dec_step + n_group_steps)
+            mask = dec_output.generated_tokens[:,dec_step:dec_step+n_group_steps]
+            with torch.autograd.profiler.record_function(f"step_size_{n_group_steps}_step_{current_step}"):
+                internal_pred = self.generate_internal_step_comp(batch_size, current_idx, dec_state, cfg_scale, temperature, top_p, cfg_filter_top_k, n_group_steps,mask)
+
+            dec_step += n_group_steps
+            current_idx += n_group_steps
+
+
+            dec_output.update_group(internal_pred, dec_step-n_group_steps+1, n_group_steps, not bos_over)
+
+            # Move to the CPU
+
+            internal_pred_cpu = internal_pred.detach().cpu()
+
+            if eos_idx == -1 and (internal_pred_cpu[0, :, 0] == audio_eos_value).any():
+                eos_idx = internal_pred_cpu[0, :, 0].tolist().index(audio_eos_value)
+                eos_idx = dec_step + eos_idx - n_group_steps
+            elif eos_idx != -1 and eos_idx + 15 < dec_step:
                 # 15 is taken from highest delay pattern
                 threshold_tensor = delay_pattern_Cx
                 col_indices = torch.arange(delay_pattern_Cx.max(), device=threshold_tensor.device)
