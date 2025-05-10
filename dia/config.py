@@ -127,6 +127,7 @@ class ModelConfig(BaseModel):
     fused_rope: bool = Field(default=False, description="Use fused Rope")
     use_flash_attn: bool = Field(default=False, description="Use flash attention")
     torch_linear: bool = Field(default=False, description="Use torch.linear instead of tensordot")
+    use_silu_mul: bool = Field(default=False, description="Use silu_mul instead of silu")
 
 
 class TrainingConfig(BaseModel, frozen=True):

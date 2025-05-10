@@ -4,12 +4,11 @@ import random
 
 import os
 
-# Set the environment variable before importing torch
-os.environ["TORCH_LOGS"] = "recompiles"
 
 import numpy as np
 import soundfile as sf
 import torch
+
 
 from dia.model import Dia
 
@@ -29,8 +28,16 @@ def set_seed(seed: int):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate audio using the Dia model.")
+    text = ("[S1] Okay, but seriously, pineapple on pizza is a crime against humanity."
+        "[S2] Whoa, whoa, hold up. Pineapple on pizza is a masterpiece. Sweet, tangy, revolutionary!"
 
-    parser.add_argument("--text", type=str, default="Dia is opensource model!", help="Input text for speech generation.")
+        "[S1] (gasp) Are you actually suggesting we defile sacred cheese with... fruit?!"
+
+        "[S2] Defile? Or elevate? It’s like sunshine decided to crash a party in your mouth. Admit it—it’s genius."
+
+        "[S1] Sunshine doesn’t belong at my dinner table unless it’s in the form of garlic bread![S2] Garlic bread would also be improved with pineapple. Fight me.")
+
+    parser.add_argument("--text", type=str, default=text, help="Input text for speech generation.")
     parser.add_argument(
         "--output", type=str, default="output.mp3", help="Path to save the generated audio file (e.g., output.wav)."
     )
@@ -68,7 +75,7 @@ def main():
         "--cfg-scale", type=float, default=3.0, help="Classifier-Free Guidance scale (default: 3.0)."
     )
     gen_group.add_argument(
-        "--temperature", type=float, default=1.3, help="Sampling temperature (higher is more random, default: 0.7)."
+        "--temperature", type=float, default=1.2, help="Sampling temperature (higher is more random, default: 0.7)."
     )
     gen_group.add_argument("--top-p", type=float, default=0.95, help="Nucleus sampling probability (default: 0.95).")
 
@@ -116,7 +123,7 @@ def main():
     else:
         print(f"Loading from Hugging Face Hub: repo_id='{args.repo_id}'")
         try:
-            model = Dia.from_pretrained(args.repo_id, device=device, compute_dtype="float16")
+            model = Dia.from_pretrained(args.repo_id, device=device, compute_dtype="float16",use_silu_mul=True, fused_rope=True)
         except Exception as e:
             print(f"Error loading model from Hub: {e}")
             exit(1)
@@ -135,6 +142,7 @@ def main():
             temperature=args.temperature,
             top_p=args.top_p,
             verbose=True,
+            use_torch_compile=True
         )
         print("Audio generation complete.")
 
@@ -143,6 +151,10 @@ def main():
 
         sf.write(args.output, output_audio, sample_rate)
         print(f"Audio successfully saved to {args.output}")
+
+        
+        out, tk_s = model.benchmark(args.text)
+        print(f"Benchmarking: {tk_s}")
 
     except Exception as e:
         print(f"Error during audio generation or saving: {e}")
