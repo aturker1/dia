@@ -209,11 +209,8 @@ class Dia:
         config.model.use_flash_attn = kwargs.get("use_flash_attn", False)
         config.model.torch_linear = kwargs.get("torch_linear", False)
         config.model.use_silu_mul = kwargs.get("use_silu_mul", False)
+        config.model.step_size = kwargs.get("step_size", 2)
         
-
-
-
-
         print("Starting model creation")
         dia = cls(config, compute_dtype, device, load_dac)
         print("Model created")
@@ -610,37 +607,6 @@ class Dia:
         return internal_pred
 
 
-    def generate_internal_step(self, batch_size, dec_step, current_idx, dec_state, dec_output, cfg_scale, temperature, top_p, cfg_filter_top_k, bos_over, max_tokens):
-        internal_step_size = 15
-        internal_pred = torch.zeros((batch_size, internal_step_size, self.config.data.channels), dtype=torch.long, device=self.device)
-        for internal_step in range(internal_step_size):
-            torch.compiler.cudagraph_mark_step_begin()
-            current_step_idx = dec_step + 1
-            dec_state.prepare_step(dec_step)
-            tokens_Bx1xC = dec_output.get_tokens_at(dec_step).repeat_interleave(2, dim=0)  # Repeat for CFG
-
-            pred_BxC = self._decoder_step(
-                tokens_Bx1xC,
-                dec_state,
-                cfg_scale,
-                temperature,
-                top_p,
-                cfg_filter_top_k,
-                current_idx,
-            )
-
-            internal_pred[:, internal_step, :] = pred_BxC
-            dec_output.update_one(pred_BxC, current_step_idx, not bos_over)
-
-            current_idx += 1
-            dec_step += 1
-
-
-            if dec_step >= max_tokens:
-                break
-
-        return internal_pred, dec_step
-
     @torch.inference_mode()
     def benchmark(self, text: str, max_tokens: int | None = None) -> float:
         """Runs a benchmark test on the model.
@@ -733,7 +699,7 @@ class Dia:
             # Compilation can take about a minute.
             self._prepare_generation = torch.compile(self._prepare_generation, dynamic=True, fullgraph=True)
             self._decoder_step = torch.compile(self._decoder_step, fullgraph=True, mode="max-autotune")            
-            self.generate_internal_step_comp = torch.compile(self.generate_internal_step_comp, fullgraph=True, mode="max-autotune")
+            self.generate_internal_step_comp = torch.compile(self.generate_internal_step_comp, mode="max-autotune")
             self._compiled = True
 
         if isinstance(audio_prompt, list):
@@ -772,7 +738,7 @@ class Dia:
         eos_idx = -1
         start_time = time.time()
         current_step = 0
-        n_group_steps = 2
+        n_group_steps = self.config.model.step_size
         torch.cuda.synchronize()
         s_dec_time = time.time()
         # --- Generation Loop ---

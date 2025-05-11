@@ -128,6 +128,7 @@ class ModelConfig(BaseModel):
     use_flash_attn: bool = Field(default=False, description="Use flash attention")
     torch_linear: bool = Field(default=False, description="Use torch.linear instead of tensordot")
     use_silu_mul: bool = Field(default=False, description="Use silu_mul instead of silu")
+    step_size: int = Field(default=2, description="Step size for quantization")
 
 
 class TrainingConfig(BaseModel, frozen=True):

@@ -237,8 +237,7 @@ class RotaryEmbedding(nn.Module):
         self.base = base
         
         if fused_rope:
-            print("Fused Rope")
-            self.register_buffer("cache",self._compute_cos_sin_cache().type(torch.float16), persistent=False)
+            self.register_buffer("cache",self._compute_cos_sin_cache().type(self.compute_dtype), persistent=False)
         else:
 
             half_embedding_dim = embedding_dims // 2
@@ -284,8 +283,7 @@ class RotaryEmbedding(nn.Module):
                                         self.embedding_dims, 
                                         self.cache, 
                                         False)
-            inputs.copy_(query_contiguous)
-            return inputs
+            return query_contiguous
 
         else:
             position = position.unsqueeze(-1).unsqueeze(-1)
