@@ -172,11 +172,9 @@ class MlpBlock(nn.Module):
         self.use_silu_mul = config.model.use_silu_mul
 
         if config.model.use_silu_mul:
-            print("Using torch.linear")
             self.wi_fused = OptimizedLinear(in_features=embed_dim, out_features=2*intermediate_dim, weight_dtype=compute_dtype)
             self.wo = OptimizedLinear(in_features=intermediate_dim, out_features=embed_dim, weight_dtype=compute_dtype)
         else:
-            print("Using DenseGeneral")
             self.wi_fused = DenseGeneral(
                 in_shapes=(embed_dim,),
                 out_features=(2, intermediate_dim),

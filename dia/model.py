@@ -608,7 +608,7 @@ class Dia:
 
 
     @torch.inference_mode()
-    def benchmark(self, text: str, max_tokens: int | None = None) -> float:
+    def benchmark(self, text: str, max_tokens: int | None = None, compile_model: bool = True) -> float:
         """Runs a benchmark test on the model.
 
         Generates audio for the given text prompt and measures the time taken
@@ -624,7 +624,7 @@ class Dia:
         # Run 3 times and take median
         times = []
         for _ in range(3):
-            output, tk_s = self.generate(text, max_tokens=max_tokens,return_tk_s=True)
+            output, tk_s = self.generate(text, max_tokens=max_tokens,return_tk_s=True, use_torch_compile=compile_model)
             times.append(tk_s)
     
         return output, sum(times) / len(times)
