@@ -608,7 +608,7 @@ class Dia:
 
 
     @torch.inference_mode()
-    def benchmark(self, text: str, max_tokens: int | None = None, compile_model: bool = True) -> float:
+    def benchmark(self, text: str, max_tokens: int | None = None, compile_model: bool = False) -> float:
         """Runs a benchmark test on the model.
 
         Generates audio for the given text prompt and measures the time taken
